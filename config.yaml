@@ -1,0 +1,31 @@
+model:
+  task: "object detection"
+  network_file: "models/object_detection/porch/network.rpk"
+  labels_file: "models/object_detection/porch/labels.txt"
+  threshold: 0.55
+
+camera:
+  preview_type: "null"
+  config_type: "video"
+  framerate: 10
+  resolution: [640, 640]
+  buffer_count: 6
+
+stream:
+  rtsp_url: "rtsp://127.0.0.1:8554/porch"
+  bitrate: 2000000
+  iperiod: 15
+
+dashboard:
+  host: "0.0.0.0"
+  port: 8000
+
+mqtt:
+  host: localhost
+  port: 1883
+  topic: porch/events
+  username: porch
+
+telegram:
+  chat_id: 123456789
+  cooldown_s: 60
