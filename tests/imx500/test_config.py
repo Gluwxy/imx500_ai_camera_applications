@@ -73,3 +73,5 @@ def test_real_configs_are_valid(tmp_path):
     config = load_config(fake, project_root / "config.yaml")
     assert config.model.labels_file.read_text().split() == ["package", "person"]
     assert config.stream.rtsp_url.endswith("/porch")
+    assert [r.name for r in config.analysis.relations] == ["carrying_package"]
+    assert config.analysis.needs_motion

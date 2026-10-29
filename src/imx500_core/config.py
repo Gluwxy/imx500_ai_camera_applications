@@ -2,7 +2,14 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, FilePath, SecretStr
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    FilePath,
+    SecretStr,
+    model_validator,
+)
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 project_root = Path(__file__).resolve().parents[2]
@@ -54,9 +61,83 @@ class TelegramConfig(Base):
     token: SecretStr
 
 
+class TrackerConfig(Base):
+    """modlib BYTETracker, one instance per class. Buffers count inferences."""
+
+    min_score: float = Field(default=0.25, ge=0.0, le=1.0)  # fed to the tracker
+    # High score: a new track needs > track_thresh + 0.1
+    track_thresh: float = Field(default=0.45, ge=0.0, le=1.0)
+    track_buffer: int = Field(default=30, ge=1)
+    match_thresh: float = Field(default=0.8, ge=0.0, le=1.0)
+    mot20: bool = True  # False fuses the score into the cost: nested boxes drop
+    # Inferences a track may live on low scores only before it is ignored
+    max_low_streak: int = Field(default=15, ge=0)
+
+
+class MatcherConfig(Base):
+    """modlib Matcher (overlap = intersection / area of the matched box)."""
+
+    min_overlap_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
+    hysteresis: float = Field(default=0.4, ge=0.0, le=1.0)
+    max_missing_overlap: int = Field(default=60, ge=1)
+    max_missing_tracker: int = Field(default=30, ge=1)
+
+
+class MotionConfig(Base):
+    """modlib Motion on a downscaled copy of the frame (only run if needed)."""
+
+    scale: float = Field(default=0.5, gt=0.0, le=1.0)
+    size_threshold: int = Field(default=300, ge=1)  # px² at full resolution
+    show: bool = False  # draw the motion boxes (debug)
+
+
+class RelationConfig(Base):
+    """A `subject` track is active while every condition holds.
+
+    - `objects`: each class must overlap the subject (one modlib Matcher each).
+    - `moving`: motion must overlap the subject (modlib Motion + Matcher).
+
+    Class names come from the project's labels.txt.
+    """
+
+    name: str
+    subject: str
+    objects: tuple[str, ...] = ()
+    moving: bool = False
+    matcher: MatcherConfig = MatcherConfig()
+    motion_matcher: MatcherConfig = MatcherConfig(min_overlap_threshold=0.3)
+
+    @model_validator(mode="after")
+    def _has_a_condition(self) -> "RelationConfig":
+        if not self.objects and not self.moving:
+            raise ValueError(f"relation '{self.name}' needs `objects` or `moving`")
+        if self.subject in self.objects:
+            raise ValueError(f"relation '{self.name}': subject is also an object")
+        return self
+
+
+class AnalysisConfig(Base):
+    enabled: bool = True
+    tracker: TrackerConfig = TrackerConfig()
+    motion: MotionConfig = MotionConfig()
+    relations: tuple[RelationConfig, ...] = ()
+
+    @model_validator(mode="after")
+    def _unique_names(self) -> "AnalysisConfig":
+        names = [r.name for r in self.relations]
+        if len(names) != len(set(names)):
+            raise ValueError(f"relation names must be unique: {names}")
+        return self
+
+    @property
+    def needs_motion(self) -> bool:
+        return any(r.moving for r in self.relations)
+
+
 class AppConfig(Base):
     model: ModelConfig
     camera: IMX500Config = IMX500Config()
+    analysis: AnalysisConfig = AnalysisConfig()
     stream: StreamConfig = StreamConfig()
     dashboard: DashboardConfig = DashboardConfig()
     mqtt: MqttConfig = MqttConfig()
