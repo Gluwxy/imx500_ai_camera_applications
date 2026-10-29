@@ -1,0 +1,50 @@
+name: CI - Lint and Test
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+# Cancel an older run of the same branch/PR when a new commit arrives
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Same Python as Raspberry Pi OS Trixie. pyproject.toml only allows a
+      # system interpreter (uv never downloads one), so it must come from here.
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      # No --system-site-packages here: on the runner numpy, cv2 and lap come
+      # from PyPI (as modlib dependencies) and picamera2 is mocked by the tests.
+      - name: Install dependencies
+        run: uv sync --locked
+ 
+      - name: Ruff lint
+        run: uv run ruff check .
+
+      - name: Ruff format
+        run: uv run ruff format --check .
+
+      - name: Pytest
+        run: uv run pytest

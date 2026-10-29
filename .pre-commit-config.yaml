@@ -1,0 +1,26 @@
+repos:
+  # Ruff from the project's locked dev dependencies (uv.lock), so pre-commit,
+  # `make lint` and CI always use the same Ruff version and rules.
+  - repo: local
+    hooks:
+      - id: ruff
+        name: ruff check
+        entry: uv run ruff check --fix
+        language: system
+        types: [python]
+
+      - id: ruff-format
+        name: ruff format
+        entry: uv run ruff format
+        language: system
+        types: [python]
+
+      # Tests are slow for every commit: run on demand with
+      # `pre-commit run pytest --hook-stage manual`
+      - id: pytest
+        name: pytest
+        entry: uv run pytest
+        language: system
+        types: [python]
+        pass_filenames: false
+        stages: [manual]
