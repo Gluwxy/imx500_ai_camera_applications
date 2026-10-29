@@ -1,0 +1,7 @@
+model:
+  task: "object detection"
+  network_file: "dummy_network.rpk"
+  labels_file: "dummy_labels.txt"
+  threshold: 0.60
+telegram:
+  chat_id: 987654321
