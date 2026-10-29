@@ -72,20 +72,59 @@ class Secrets(BaseSettings):
     mqtt_password: SecretStr | None = None
 
 
-def load_config(yaml_file: str | Path = project_root / "config.yaml") -> AppConfig:
-    yaml_file = Path(yaml_file).resolve()
-    data = yaml.safe_load(yaml_file.read_text()) or {}
+def _read_yaml(path: Path) -> dict:
+    return yaml.safe_load(path.read_text()) or {}
 
-    base_dir = yaml_file.parent
 
-    if "model" in data:
-        if "network_file" in data["model"]:
-            data["model"]["network_file"] = base_dir / data["model"]["network_file"]
-        if "labels_file" in data["model"]:
-            data["model"]["labels_file"] = base_dir / data["model"]["labels_file"]
+def _merge(base: dict, override: dict) -> dict:
+    """Recursive merge: `override` wins, nested sections are merged key by key."""
+    merged = dict(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
 
-    # .env secrets
-    secrets = Secrets(_env_file=base_dir / ".env")
+
+def find_project(name: str, projects_dir: Path = project_root / "projects") -> Path:
+    """`porch_piracy` -> projects/<task>/porch_piracy (task folder found)."""
+    matches = sorted(p for p in projects_dir.glob(f"*/{name}") if p.is_dir())
+    if not matches:
+        raise FileNotFoundError(f"Project '{name}' not found in {projects_dir}/*/")
+    if len(matches) > 1:
+        raise ValueError(f"Project '{name}' is ambiguous: {matches}")
+    return matches[0]
+
+
+def load_config(
+    project: str | Path, base_file: str | Path = project_root / "config.yaml"
+) -> AppConfig:
+    """Root config.yaml (shared) merged with the project's config.yaml.
+
+    `project` is a project name (`porch_piracy`) or its folder. Model paths in
+    the project file are relative to the project folder; secrets come from the
+    environment or the `.env` next to the root config.
+    """
+    project_dir = Path(project)
+    if not project_dir.is_dir():
+        project_dir = find_project(str(project))
+    project_dir = project_dir.resolve()
+    base_file = Path(base_file).resolve()
+
+    project_file = project_dir / "config.yaml"
+    if not project_file.is_file():
+        raise FileNotFoundError(f"Missing project config: {project_file}")
+
+    data = _merge(_read_yaml(base_file), _read_yaml(project_file))
+
+    model = data.get("model", {})
+    for key in ("network_file", "labels_file"):
+        if key in model:
+            model[key] = project_dir / model[key]
+
+    # .env secrets (shared by all projects)
+    secrets = Secrets(_env_file=base_file.parent / ".env")
     data.setdefault("telegram", {})["token"] = secrets.telegram_token
     data.setdefault("mqtt", {})["password"] = secrets.mqtt_password
 

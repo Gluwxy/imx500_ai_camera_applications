@@ -19,18 +19,29 @@ except (ImportError, RuntimeError):
 
 
 @pytest.fixture
-def model_files(tmp_path: Path) -> tuple[Path, Path]:
-    """Fake model files: `FilePath` needs them to exist and git ignores `*.rpk`."""
-    network = tmp_path / "dummy_network.rpk"
-    labels = tmp_path / "dummy_labels.txt"
-    network.write_bytes(b"")
-    labels.write_text("package\nperson\n")
-    return network, labels
+def project_dir(tmp_path: Path) -> Path:
+    """Fake project: `fixtures/project/config.yaml` plus fake model files.
+
+    `FilePath` needs the model files to exist and git ignores `*.rpk`, so they
+    are created here instead of being stored in the repo.
+    """
+    project = tmp_path / "projects" / "object_detection" / "demo"
+    (project / "models").mkdir(parents=True)
+    shutil.copy(FIXTURES_DIR / "project" / "config.yaml", project / "config.yaml")
+    (project / "models" / "dummy_network.rpk").write_bytes(b"")
+    (project / "dummy_labels.txt").write_text("package\nperson\n")
+    return project
 
 
 @pytest.fixture
-def config_file(model_files: tuple[Path, Path]) -> Path:
-    """`fixtures/config_test.yaml` copied next to the fake model files."""
-    path = model_files[0].parent / "config_test.yaml"
-    shutil.copy(FIXTURES_DIR / "config_test.yaml", path)
+def base_file(tmp_path: Path) -> Path:
+    """Shared root config, outside the project folder (like the real one)."""
+    path = tmp_path / "config.yaml"
+    shutil.copy(FIXTURES_DIR / "base_config.yaml", path)
     return path
+
+
+@pytest.fixture
+def model_files(project_dir: Path) -> tuple[Path, Path]:
+    network = project_dir / "models" / "dummy_network.rpk"
+    return network, project_dir / "dummy_labels.txt"

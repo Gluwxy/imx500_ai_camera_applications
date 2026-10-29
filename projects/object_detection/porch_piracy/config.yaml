@@ -1,0 +1,15 @@
+# Porch piracy. Merged over the root config.yaml: only what differs goes here.
+# Model paths are relative to this folder.
+
+model:
+  task: "object detection"
+  network_file: "models/network.rpk"  # not in git: `make model PROJECT=porch_piracy`
+  labels_file: "labels.txt"
+  threshold: 0.55
+
+stream:
+  rtsp_url: "rtsp://127.0.0.1:8554/porch"
+
+mqtt:
+  topic: porch/events
+  username: porch

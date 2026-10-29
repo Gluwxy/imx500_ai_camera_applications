@@ -1,0 +1,9 @@
+model:
+  task: "object detection"
+  network_file: "models/dummy_network.rpk"
+  labels_file: "dummy_labels.txt"
+  threshold: 0.60
+camera:
+  framerate: 10
+mqtt:
+  topic: project/events

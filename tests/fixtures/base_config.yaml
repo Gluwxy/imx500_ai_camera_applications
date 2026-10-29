@@ -1,0 +1,7 @@
+camera:
+  framerate: 30
+  resolution: [640, 640]
+mqtt:
+  topic: base/events
+telegram:
+  chat_id: 987654321

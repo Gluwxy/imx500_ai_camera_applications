@@ -1,8 +1,6 @@
-model:
-  task: "object detection"
-  network_file: "models/object_detection/porch/network.rpk"
-  labels_file: "models/object_detection/porch/labels.txt"
-  threshold: 0.55
+# Shared defaults for every project. Each project overrides what it needs in
+# projects/<task>/<project>/config.yaml (merged key by key over this file).
+# Secrets (TELEGRAM_TOKEN, MQTT_PASSWORD) come from .env in the repo root.
 
 camera:
   preview_type: "null"
@@ -12,7 +10,7 @@ camera:
   buffer_count: 6
 
 stream:
-  rtsp_url: "rtsp://127.0.0.1:8554/porch"
+  rtsp_url: "rtsp://127.0.0.1:8554/stream"
   bitrate: 2000000
   iperiod: 15
 
@@ -23,8 +21,7 @@ dashboard:
 mqtt:
   host: localhost
   port: 1883
-  topic: porch/events
-  username: porch
+  topic: imx500/events
 
 telegram:
   chat_id: 123456789
