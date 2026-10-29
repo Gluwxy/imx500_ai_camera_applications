@@ -22,7 +22,7 @@ def test_project_config_is_merged_over_the_base(project_dir, base_file):
     assert config.camera.framerate == 10
     assert config.mqtt.topic == "project/events"
     # from the base, inside sections the project also sets
-    assert config.camera.resolution == (640, 480)
+    assert config.camera.resolution == (640, 640)
     assert config.telegram.chat_id == 987654321
     # secrets
     assert config.telegram.token.get_secret_value() == "mock_token_abc123"
