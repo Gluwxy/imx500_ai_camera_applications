@@ -16,6 +16,8 @@ except (ImportError, RuntimeError):
     sys.modules["picamera2"] = picamera2_mock
     sys.modules["picamera2.devices"] = picamera2_mock.devices
     sys.modules["picamera2.devices.imx500"] = picamera2_mock.devices.imx500
+    sys.modules["picamera2.encoders"] = picamera2_mock.encoders
+    sys.modules["picamera2.outputs"] = picamera2_mock.outputs
 
 
 @pytest.fixture

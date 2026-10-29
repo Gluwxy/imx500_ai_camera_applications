@@ -31,10 +31,13 @@ make model PROJECT=porch_piracy           # download network.rpk from GitHub Rel
 
 - `src/imx500_core/` — shared core (`module-name` in `pyproject.toml`; the project name differs).
   - `config.py` — frozen Pydantic models (`extra="forbid"`: a new YAML key needs a model field). `load_config("porch_piracy")` merges the root `config.yaml` (shared) with `projects/<task>/<project>/config.yaml` (wins key by key); model paths are relative to the project folder; secrets (`TELEGRAM_TOKEN`, `MQTT_PASSWORD`) come from the environment or the root `.env`.
-  - `camera/camera.py` — IMX500 + Picamera2 setup (`setup_camera`); closes the camera if configuration fails.
-  - `main.py` / `__main__.py` — entry point (stub).
-  - Planned: `processing/` (modlib pp, tracker, matcher, motion, annotator), `monitors/` (dashboard, telemetry), `services/` (MQTT, Telegram).
-- `projects/<task>/<project>/` — one app per folder: `config.yaml`, `labels.txt`, `models/` (git-ignored `.rpk`), README.
+  - `camera/camera.py` — IMX500 + Picamera2 setup (`setup_camera`); closes the camera if configuration fails. `camera/stream.py` — H.264 encoder → RTSP (`PyavOutput`, TCP).
+  - `processing/overlay.py` — `pre_callback`: IMX500 outputs → modlib `pp_od_yolo_ultralytics` → boxes in image space (modlib `ROI`) → `SceneAnalyzer` → modlib `Annotator` drawing in place on the `MappedArray`.
+  - `processing/analysis.py` — `SceneAnalyzer`: one modlib `BYTETracker` per class (+ `max_low_streak`), modlib `Motion` only if a relation needs it, and the project's `analysis.relations`: per relation one `Matcher` per object class and one on the motion boxes; a subject track is active while every condition holds (`RelationEvent` on start/end).
+  - `main.py` / `__main__.py` — `python -m imx500_core <project>` (or `$PROJECT`): config → analyzer → camera → overlay → stream → watchdog/heartbeat loop; returns the exit code.
+  - Planned: `monitors/` (dashboard, telemetry), `services/` (MQTT, Telegram, fed by `RelationEvent`s).
+- `projects/<task>/<project>/` — one app per folder: `config.yaml` (model, overrides, `analysis.relations`), `labels.txt`, `project.mk` (model release for `make model`), `models/` (git-ignored), README.
+  A relation is `{name, subject, objects: [...], moving: bool}` with class names from `labels.txt`; e.g. porch_piracy: `subject: person, objects: [package], moving: true`. A motion-only relation (`objects: []`, `moving: true`) works with any class.
 - `tests/` — pytest. `conftest.py` mocks `picamera2` when it isn't installed and creates fake model files in `tmp_path` (`*.rpk` is git-ignored, never commit a dummy one). `tests/fixtures/` holds a base config and a project config.
 - `deploy/` — systemd units and MediaMTX config (to be ported).
 - `.github/workflows/ci.yml` — Python 3.13, `uv sync --locked`, Ruff check + format, pytest.
