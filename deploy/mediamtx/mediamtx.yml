@@ -1,0 +1,14 @@
+# MediaMTX: only RTSP (TCP, the app publishes here) and WebRTC (dashboard
+# preview, port 8889) are enabled.
+rtmp: no
+hls: no
+webrtc: yes
+srt: no
+moq: no
+rtspTransports: [tcp]
+
+paths:
+  # Any stream path a project publishes (stream.rtsp_url in its config.yaml,
+  # e.g. rtsp://127.0.0.1:8554/porch)
+  all_others:
+    source: publisher

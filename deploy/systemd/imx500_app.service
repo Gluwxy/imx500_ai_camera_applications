@@ -1,0 +1,24 @@
+[Unit]
+Description=IMX500 AI Camera application
+# Wants (not Requires): a MediaMTX restart must not stop the app
+After=network-online.target mediamtx.service
+Wants=network-online.target mediamtx.service
+
+[Service]
+Type=simple
+User=gluwxy
+WorkingDirectory=/home/gluwxy/imx500_ai_camera_applications
+# Project to run (folder name under projects/<task>/). Change it with
+# `sudo systemctl edit imx500_app` instead of editing this file.
+Environment=PROJECT=porch_piracy
+Environment=PYTHONUNBUFFERED=1
+# The venv python directly, not `uv run`: uv forwards Ctrl+C, so SIGINT
+# would arrive twice. SIGTERM triggers the app's graceful shutdown.
+ExecStart=/home/gluwxy/imx500_ai_camera_applications/.venv/bin/python -m imx500_core ${PROJECT}
+# The app exits with code 1 on fatal errors / frozen camera: restart it
+Restart=always
+RestartSec=5s
+TimeoutStopSec=15s
+
+[Install]
+WantedBy=multi-user.target

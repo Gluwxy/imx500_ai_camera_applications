@@ -1,0 +1,16 @@
+[Unit]
+Description=MediaMTX streaming server (RTSP / WebRTC)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=gluwxy
+WorkingDirectory=/home/gluwxy/imx500_ai_camera_applications/deploy/mediamtx
+# Binary downloaded as in the README (~/mediamtx); config from the repo
+ExecStart=/home/gluwxy/mediamtx/mediamtx mediamtx.yml
+Restart=always
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
