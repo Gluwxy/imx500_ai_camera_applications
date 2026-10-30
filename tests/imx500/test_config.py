@@ -75,3 +75,23 @@ def test_real_configs_are_valid(tmp_path):
     assert config.stream.rtsp_url.endswith("/porch")
     assert [r.name for r in config.analysis.relations] == ["carrying_package"]
     assert config.analysis.needs_motion
+    assert config.analysis.alerts == ("carrying_package",)
+    assert config.annotator.colors.classes["person"] == "#cba6f7"
+    assert config.clips.dir == project_root / "data" / "clips"
+    assert config.mqtt.enabled
+
+
+def test_telegram_token_only_needed_when_enabled(project_dir, base_file, monkeypatch):
+    monkeypatch.delenv("TELEGRAM_TOKEN")
+    project_file = project_dir / "config.yaml"
+    project_file.write_text(project_file.read_text() + "telegram:\n  enabled: false\n")
+    assert load_config(project_dir, base_file).telegram.token is None
+
+
+def test_colors_must_be_hex(project_dir, base_file):
+    project_file = project_dir / "config.yaml"
+    project_file.write_text(
+        project_file.read_text() + "annotator:\n  colors:\n    alert: red\n"
+    )
+    with pytest.raises(ValidationError, match="#rrggbb"):
+        load_config(project_dir, base_file)

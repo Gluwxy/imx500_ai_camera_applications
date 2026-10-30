@@ -37,7 +37,7 @@ def wired(monkeypatch, project_dir, base_file):
     camera = MagicMock(picam2=picam2)
     camera.imx500.get_input_size.return_value = (640, 640)
     setup = MagicMock(return_value=camera)
-    stream = MagicMock()
+    stream = MagicMock(return_value=(MagicMock(), MagicMock()))
     monkeypatch.setattr(app, "setup_camera", setup)
     monkeypatch.setattr(app, "start_streaming", stream)
     monkeypatch.setattr(app.signal, "signal", MagicMock())
@@ -54,6 +54,8 @@ def test_runs_and_releases_the_camera_on_shutdown(wired, monkeypatch):
     setup.assert_called_once()
     stream.assert_called_once()
     assert picam2.pre_callback is not None
+    _, recorder = stream.return_value
+    recorder.close.assert_called_once()  # clip finalized before the encoder stops
     picam2.stop_recording.assert_called_once()
     picam2.close.assert_called_once()
 

@@ -14,15 +14,33 @@ stream:
   bitrate: 2000000
   iperiod: 15
 
+# Alert clips: `seconds` before and after each alert (CircularOutput2)
+clips:
+  seconds: 5
+  dir: data/clips       # relative to the repo root (git-ignored)
+  max_clips: 20         # oldest clips are deleted to protect the microSD
+
+# Box colors (Catppuccin Mocha). Projects set `annotator.colors.classes`.
+annotator:
+  legend: false         # optional chips (classes, states) in the top-left corner
+  show_motion: false    # draw the Motion boxes (debug)
+  colors:
+    default: "#a6adc8"  # subtext0: classes without their own color
+    alert: "#f38ba8"    # red: subject of an active alert relation
+    moving: "#a6e3a1"   # green: subject moving (relations with `moving: true`)
+    motion: "#b4befe"   # lavender: Motion boxes and the "motion" chip
+
 dashboard:
   host: "0.0.0.0"
   port: 8000
 
 mqtt:
+  enabled: false        # needs a broker (e.g. Mosquitto); projects enable it
   host: localhost
   port: 1883
   topic: imx500/events
 
 telegram:
+  enabled: true         # needs TELEGRAM_TOKEN in .env
   chat_id: 123456789
   cooldown_s: 60

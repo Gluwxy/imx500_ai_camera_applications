@@ -1,8 +1,9 @@
 """Entry point: `python -m imx500_core <project>` (or PROJECT in the env).
 
 config → analyzer (before the camera: config errors fail fast) → camera →
-overlay (pre_callback) → H.264/RTSP stream → watchdog loop. Everything after
-opening the camera lives inside the `try`, so `finally` always releases it.
+overlay (pre_callback) → H.264 stream + clip buffer → watchdog loop.
+Everything after opening the camera lives inside the `try`, so `finally`
+always releases it.
 """
 
 import argparse
@@ -16,7 +17,7 @@ from pathlib import Path
 from threading import Event
 
 from .camera.camera import setup_camera
-from .camera.stream import start_streaming
+from .camera.stream import ClipRecorder, start_streaming
 from .config import load_config
 from .processing.analysis import SceneAnalyzer
 from .processing.overlay import DetectionOverlay, load_labels
@@ -91,6 +92,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     picam2 = camera_state.picam2
 
     exit_code = 0
+    recorder: ClipRecorder | None = None
     try:
         overlay = DetectionOverlay(
             picam2=picam2,
@@ -100,12 +102,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             analyzer=analyzer,
             min_score=analysis.tracker.min_score if analyzer else None,
             motion_scale=analysis.motion.scale,
-            show_motion=analysis.motion.show,
+            annotator_cfg=config.annotator,
         )
         picam2.pre_callback = overlay
 
         log.info("Starting RTSP video streaming...")
-        start_streaming(picam2, config.stream)
+        _, recorder = start_streaming(picam2, config.stream, config.clips)
         log.info("System online. Streaming to %s", config.stream.rtsp_url)
 
         while not stop_event.wait(timeout=HEARTBEAT_INTERVAL_S):
@@ -134,6 +136,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     finally:
         log.info("Releasing hardware and closing connections...")
+        # The clip in progress is finalized while the encoder still runs
+        if recorder is not None:
+            _safe_cleanup(recorder.close, "clip_recorder")
         _safe_cleanup(picam2.stop_recording, "stop_recording")
         _safe_cleanup(picam2.stop_preview, "stop_preview")
         _safe_cleanup(picam2.close, "close")

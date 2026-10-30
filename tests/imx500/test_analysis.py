@@ -283,3 +283,80 @@ def test_concat_keeps_tracker_ids():
     assert out.tracker_id.tolist() == [3, 7]
     assert out.class_id.tolist() == [1, 0]
     assert len(concat([])) == 0
+
+
+# --- Events ---------------------------------------------------------------------
+
+
+def _with(detections=(), alerts=(), *relations):
+    cfg = AnalysisConfig(relations=relations, detections=detections, alerts=alerts)
+    return SceneAnalyzer(LABELS, cfg)
+
+
+def test_detection_events_start_and_end_after_track_buffer():
+    a = _with(("person",))
+    events = []
+    a.on_event = events.append
+    for _ in range(3):
+        _step(a, (PERSON, 0.85, *PERSON_BOX), (PACKAGE, 0.93, *BOX))
+    (pid,) = _ids(a, PERSON)
+    assert [(e.kind, e.name, e.track_id, e.active) for e in events] == [
+        ("detection", "person", pid, True)
+    ]  # once, and only for the configured classes
+    for _ in range(31):  # track_buffer (30) inferences without the person
+        _step(a)
+    assert events[-1].name == "person" and not events[-1].active
+    assert len(events) == 2
+
+
+def test_relation_events_reach_on_event_with_json():
+    a = _with((), (), _relation(moving=False))
+    events = []
+    a.on_event = events.append
+    _walk(a, WARMUP, moving=False)
+    (event,) = events
+    data = event.json()
+    assert data["kind"] == "relation" and data["name"] == "carrying"
+    assert data["subject"] == "person" and data["active"] is True
+    assert "T" in data["time"]  # ISO 8601
+
+
+def test_failing_event_handler_does_not_break_the_analysis(caplog):
+    a = _with(("person",))
+    a.on_event = lambda e: 1 / 0
+    _step(a, (PERSON, 0.85, *PERSON_BOX))
+    assert len(_ids(a, PERSON)) == 1
+    assert "Event handler failed" in caplog.text
+
+
+def test_alert_ids_only_cover_alert_relations():
+    plain = _relation(name="with_package", moving=False)
+    alert = _relation(name="moving_person", objects=(), moving=True)
+    a = _with((), ("moving_person",), plain, alert)
+    assert a.alert_names == ["moving_person"]
+    _walk(a, WARMUP)
+    (pid,) = _ids(a, PERSON)
+    assert a.active_ids == {pid} and a.alert_ids == {pid}
+
+
+@pytest.mark.parametrize(
+    ("cfg", "message"),
+    [
+        ({"alerts": ["ghost"]}, "alerts not in detections/relations"),
+        (
+            {
+                "detections": ["person"],
+                "relations": [{"name": "person", "subject": "bag", "moving": True}],
+            },
+            "clash",
+        ),
+    ],
+)
+def test_invalid_events_are_rejected(cfg, message):
+    with pytest.raises(ValidationError, match=message):
+        AnalysisConfig.model_validate(cfg)
+
+
+def test_unknown_detection_class_fails_fast():
+    with pytest.raises(ValueError, match="car"):
+        _with(("car",))

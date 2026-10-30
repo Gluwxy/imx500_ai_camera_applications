@@ -12,8 +12,12 @@ only modlib's pure-numpy pieces are used inside the `pre_callback`:
 The input tensor -> image mapping is expressed as a modlib `ROI` and applied
 once per inference (`compensate_for_roi`), so every box (detections, tracks,
 motion) is normalized to the output image. With a `SceneAnalyzer` the tracks
-are drawn instead of the raw detections, tracks active in a relation in
-`ALERT_COLOR`.
+are drawn instead of the raw detections. The label of each track is its
+legend: class, conditions met (`+package`, `moving`) and score; its color is
+its state (`annotator.colors`, Catppuccin by default): the class color, then
+`moving` once Motion sees it move, then `alert` while it is the subject of an
+active alert relation. Motion boxes are thin unlabeled outlines (optional),
+and an optional chip legend sits in the top-left corner.
 """
 
 import logging
@@ -29,6 +33,7 @@ from modlib.models.post_processors import pp_od_yolo_ultralytics
 from picamera2 import MappedArray, Picamera2
 from picamera2.devices import IMX500
 
+from ..config import AnnotatorConfig, ColorsConfig
 from .analysis import SceneAnalyzer
 
 log = logging.getLogger(__name__)
@@ -40,8 +45,7 @@ SENSOR_SIZE = (4056, 3040)
 # modlib draws with `Color.as_bgr()`, so their palette must be swapped.
 RGB_ORDER_FORMATS = {"XBGR8888", "BGR888"}
 
-ALERT_COLOR = Color(255, 0, 0)  # track active in a relation
-MOTION_COLOR = Color(128, 128, 128)
+LEGEND_MARGIN = 6  # px from the image corner and between chips
 
 _EMPTY = Detections(
     bbox=np.empty((0, 4), dtype=np.float32),
@@ -61,6 +65,20 @@ def buffer_color(color: Color, pixel_format: str) -> Color:
     if pixel_format in RGB_ORDER_FORMATS:
         return Color(color.b, color.g, color.r)
     return color
+
+
+def class_palette(
+    labels: list[str], colors: ColorsConfig, pixel_format: str
+) -> ColorPalette:
+    """One color per class index (`colors.classes`, else `colors.default`)."""
+    return ColorPalette(
+        [
+            buffer_color(
+                Color.from_hex(colors.classes.get(name, colors.default)), pixel_format
+            )
+            for name in labels
+        ]
+    )
 
 
 def palette_for_format(pixel_format: str) -> ColorPalette:
@@ -131,7 +149,7 @@ class DetectionOverlay:
         analyzer: SceneAnalyzer | None = None,
         min_score: float | None = None,
         motion_scale: float = 0.5,
-        show_motion: bool = False,
+        annotator_cfg: AnnotatorConfig | None = None,
     ) -> None:
         self._picam2 = picam2
         self._imx500 = imx500
@@ -142,7 +160,7 @@ class DetectionOverlay:
         self._analyzer = analyzer
         # With a tracker, low scores are kept: ByteTrack uses them
         self._min_score = threshold if min_score is None else min_score
-        self._show_motion = show_motion
+        self._cfg = annotator_cfg or AnnotatorConfig()
 
         stream_cfg = picam2.camera_configuration()[stream]
         self._width, self._height = stream_cfg["size"]
@@ -151,15 +169,18 @@ class DetectionOverlay:
             max(1, round(self._width * motion_scale)),
             max(1, round(self._height * motion_scale)),
         )
+        colors = self._cfg.colors
+        self._palette = class_palette(labels, colors, self._format)
         self._annotator = annotator or Annotator(
-            color=palette_for_format(self._format),
+            color=self._palette,
             thickness=2,
             text_scale=0.5,
             text_thickness=1,
             text_padding=4,
         )
-        self._alert_color = buffer_color(ALERT_COLOR, self._format)
-        self._motion_color = buffer_color(MOTION_COLOR, self._format)
+        self._alert_color = buffer_color(Color.from_hex(colors.alert), self._format)
+        self._motion_color = buffer_color(Color.from_hex(colors.motion), self._format)
+        self._moving_color = buffer_color(Color.from_hex(colors.moving), self._format)
 
         self.detections: Detections = _EMPTY
         self.roi = ROI(0.0, 0.0, 1.0, 1.0)
@@ -245,15 +266,52 @@ class DetectionOverlay:
                 )
             return
 
-        if self._show_motion and len(a.motion_boxes):
+        if self._cfg.show_motion and len(a.motion_boxes):
+            thickness, ann.thickness = ann.thickness, 1
             ann.annotate_boxes(
                 frame, a.motion_boxes, skip_label=True, color=self._motion_color
             )
+            ann.thickness = thickness
         tracks = a.tracks
-        if not len(tracks):
-            return
-        alert = np.isin(np.asarray(tracks.tracker_id), list(a.active_ids))
-        for mask, color in ((~alert, None), (alert, self._alert_color)):
-            sel = tracks[mask]
-            if len(sel):
-                ann.annotate_boxes(frame, sel, labels=a.labels_for(sel), color=color)
+        if len(tracks):
+            ids = np.asarray(tracks.tracker_id)
+            alert = np.isin(ids, list(a.alert_ids))
+            moving = np.isin(ids, list(a.moving_ids)) & ~alert
+            groups = (
+                (~alert & ~moving, None),  # class color (palette)
+                (moving, self._moving_color),
+                (alert, self._alert_color),
+            )
+            for mask, color in groups:
+                sel = tracks[mask]
+                if len(sel):
+                    ann.annotate_boxes(
+                        frame, sel, labels=a.labels_for(sel), color=color
+                    )
+        if self._cfg.legend:
+            self._draw_legend(image, a)
+
+    def legend_entries(self, a: SceneAnalyzer) -> list[tuple[str, Color]]:
+        """Chips of the legend: classes, `moving`, alert relations, `motion`."""
+        entries = [(name, self._palette.colors[i]) for i, name in enumerate(a.labels)]
+        if a.needs_motion:
+            entries.append(("moving", self._moving_color))
+        entries += [(name, self._alert_color) for name in a.alert_names]
+        if a.needs_motion and len(a.motion_boxes):
+            entries.append(("motion", self._motion_color))
+        return entries
+
+    def _draw_legend(self, image: np.ndarray, a: SceneAnalyzer) -> None:
+        ann = self._annotator
+        (_, text_h), _ = cv2.getTextSize(
+            "Ag", cv2.FONT_HERSHEY_SIMPLEX, ann.text_scale, ann.text_thickness
+        )
+        step = text_h + 2 * ann.text_padding + LEGEND_MARGIN
+        for i, (text, color) in enumerate(self.legend_entries(a)):
+            ann.set_label(
+                image,
+                x=LEGEND_MARGIN,
+                y=LEGEND_MARGIN + i * step,
+                color=color.as_bgr(),
+                label=text,
+            )

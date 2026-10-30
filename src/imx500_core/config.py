@@ -1,8 +1,9 @@
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 import yaml
 from pydantic import (
+    AfterValidator,
     BaseModel,
     ConfigDict,
     Field,
@@ -42,23 +43,67 @@ class StreamConfig(Base):
     iperiod: int = Field(default=15, ge=1)
 
 
+class ClipConfig(Base):
+    """Alert clips cut from a CircularOutput2: `seconds` before + after the event."""
+
+    seconds: float = Field(default=5.0, gt=0.0, le=30.0)
+    dir: Path = Path("data/clips")  # relative to the repo root
+    max_clips: int = Field(default=20, ge=1)  # oldest are deleted (microSD)
+
+
+def _hex_color(value: str) -> str:
+    v = value.lstrip("#")
+    if len(v) != 6 or any(c not in "0123456789abcdefABCDEF" for c in v):
+        raise ValueError(f"'{value}' is not a #rrggbb color")
+    return f"#{v.lower()}"
+
+
+HexColor = Annotated[str, AfterValidator(_hex_color)]
+
+
+class ColorsConfig(Base):
+    """Box colors (Catppuccin Mocha by default). Classes not listed: `default`."""
+
+    default: HexColor = "#a6adc8"  # subtext0
+    alert: HexColor = "#f38ba8"  # red: subject of an active alert relation
+    moving: HexColor = "#a6e3a1"  # green: subject moving (relation with `moving`)
+    motion: HexColor = "#b4befe"  # lavender: Motion boxes
+    classes: dict[str, HexColor] = {}
+
+
+class AnnotatorConfig(Base):
+    colors: ColorsConfig = ColorsConfig()
+    legend: bool = False  # chips with class/state colors, top-left corner
+    show_motion: bool = False  # draw the Motion boxes (debug)
+
+
 class DashboardConfig(Base):
     host: str = "0.0.0.0"
     port: int = Field(default=8000, ge=1, le=65535)
 
 
 class MqttConfig(Base):
+    enabled: bool = False
     host: str = "localhost"
     port: int = Field(default=1883, ge=1, le=65535)
     topic: str = "porch/events"
     username: str | None = None
     password: SecretStr | None = None  # from .env
+    client_id: str = "imx500"
+    keepalive_s: int = Field(default=60, ge=5)
 
 
 class TelegramConfig(Base):
+    enabled: bool = True
     chat_id: int
-    cooldown_s: int = Field(default=60, ge=0)
-    token: SecretStr
+    cooldown_s: int = Field(default=60, ge=0)  # per alert name
+    token: SecretStr | None = None  # from .env
+
+    @model_validator(mode="after")
+    def _token_when_enabled(self) -> "TelegramConfig":
+        if self.enabled and self.token is None:
+            raise ValueError("telegram_token is required when telegram is enabled")
+        return self
 
 
 class TrackerConfig(Base):
@@ -88,7 +133,6 @@ class MotionConfig(Base):
 
     scale: float = Field(default=0.5, gt=0.0, le=1.0)
     size_threshold: int = Field(default=300, ge=1)  # px² at full resolution
-    show: bool = False  # draw the motion boxes (debug)
 
 
 class RelationConfig(Base):
@@ -117,16 +161,31 @@ class RelationConfig(Base):
 
 
 class AnalysisConfig(Base):
+    """What the analyzer reports as events.
+
+    - `detections`: classes whose tracks are events (event name = class name):
+      started when a track appears, ended when it is gone for `track_buffer`.
+    - `relations`: see `RelationConfig` (event name = relation name).
+    - `alerts`: event names whose start records a clip and notifies Telegram.
+    Every event is published to MQTT.
+    """
+
     enabled: bool = True
     tracker: TrackerConfig = TrackerConfig()
     motion: MotionConfig = MotionConfig()
+    detections: tuple[str, ...] = ()
     relations: tuple[RelationConfig, ...] = ()
+    alerts: tuple[str, ...] = ()
 
     @model_validator(mode="after")
-    def _unique_names(self) -> "AnalysisConfig":
+    def _event_names(self) -> "AnalysisConfig":
         names = [r.name for r in self.relations]
         if len(names) != len(set(names)):
             raise ValueError(f"relation names must be unique: {names}")
+        if clash := set(names) & set(self.detections):
+            raise ValueError(f"relation names clash with detections: {clash}")
+        if unknown := set(self.alerts) - set(names) - set(self.detections):
+            raise ValueError(f"alerts not in detections/relations: {unknown}")
         return self
 
     @property
@@ -139,6 +198,8 @@ class AppConfig(Base):
     camera: IMX500Config = IMX500Config()
     analysis: AnalysisConfig = AnalysisConfig()
     stream: StreamConfig = StreamConfig()
+    clips: ClipConfig = ClipConfig()
+    annotator: AnnotatorConfig = AnnotatorConfig()
     dashboard: DashboardConfig = DashboardConfig()
     mqtt: MqttConfig = MqttConfig()
     telegram: TelegramConfig
@@ -149,7 +210,7 @@ class Secrets(BaseSettings):
 
     model_config = SettingsConfigDict(extra="ignore")
 
-    telegram_token: SecretStr
+    telegram_token: SecretStr | None = None
     mqtt_password: SecretStr | None = None
 
 
@@ -203,6 +264,9 @@ def load_config(
     for key in ("network_file", "labels_file"):
         if key in model:
             model[key] = project_dir / model[key]
+
+    clips = data.setdefault("clips", {})
+    clips["dir"] = base_file.parent / clips.get("dir", ClipConfig().dir)
 
     # .env secrets (shared by all projects)
     secrets = Secrets(_env_file=base_file.parent / ".env")

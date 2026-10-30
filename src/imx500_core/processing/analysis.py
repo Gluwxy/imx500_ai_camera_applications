@@ -7,8 +7,10 @@ Per inference:
 2. `Motion` (only if a relation needs it) finds the moving regions.
 3. Every relation from the project's config runs one `Matcher` per object
    class (subject ∩ object) and, with `moving: true`, one on the motion boxes.
-   A subject track is *active* for a relation while all its conditions hold;
-   entering/leaving that state is logged and kept in `events`.
+   A subject track is *active* for a relation while all its conditions hold.
+4. Events (`SceneEvent`): a relation starting/ending for a track, and a track
+   of a class listed in `detections` appearing/disappearing. They are logged,
+   kept in `events` and passed to `on_event` (MQTT, clips, Telegram).
 
 Nothing here knows class names: they come from labels.txt and config.yaml.
 Picamera2 still owns the camera; this module only sees `Detections` and a
@@ -16,8 +18,11 @@ small 3-channel copy of the frame for `Motion`.
 """
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import datetime
 from types import SimpleNamespace
+from typing import Literal
 
 import numpy as np
 from modlib.apps import BYTETracker, Matcher, Motion
@@ -51,13 +56,29 @@ class BYTETrackerArgs:
 
 
 @dataclass(frozen=True)
-class RelationEvent:
-    """A subject track entered (`active=True`) or left a relation."""
+class SceneEvent:
+    """A track started (`active=True`) or ended a detection or a relation."""
 
-    relation: str
-    subject: str
+    kind: Literal["detection", "relation"]
+    name: str  # class name (detection) or relation name
+    subject: str  # class of the track
     track_id: int
     active: bool
+    time: datetime = field(default_factory=lambda: datetime.now().astimezone())
+
+    def describe(self) -> str:
+        state = "started" if self.active else "ended"
+        return f"{self.name}: {self.subject} #{self.track_id} {state}"
+
+    def json(self) -> dict:
+        return {
+            "kind": self.kind,
+            "name": self.name,
+            "subject": self.subject,
+            "track_id": self.track_id,
+            "active": self.active,
+            "time": self.time.isoformat(timespec="seconds"),
+        }
 
 
 def empty_detections() -> Detections:
@@ -128,7 +149,7 @@ class Relation:
 
     def update(
         self, tracks: Detections, motion_boxes: Detections | None
-    ) -> list[RelationEvent]:
+    ) -> list[SceneEvent]:
         subjects = tracks[tracks.class_id == self.subject_id]
         conditions = []
 
@@ -145,10 +166,10 @@ class Relation:
 
         active = set.intersection(*conditions)
         events = [
-            RelationEvent(self.cfg.name, self.cfg.subject, t, True)
+            SceneEvent("relation", self.cfg.name, self.cfg.subject, t, True)
             for t in sorted(active - self.active)
         ] + [
-            RelationEvent(self.cfg.name, self.cfg.subject, t, False)
+            SceneEvent("relation", self.cfg.name, self.cfg.subject, t, False)
             for t in sorted(self.active - active)
         ]
         self.active = active
@@ -163,10 +184,21 @@ class Relation:
 
 
 class SceneAnalyzer:
-    def __init__(self, labels: list[str], cfg: AnalysisConfig) -> None:
+    def __init__(
+        self,
+        labels: list[str],
+        cfg: AnalysisConfig,
+        on_event: Callable[[SceneEvent], None] | None = None,
+    ) -> None:
         self._labels = labels
         self._cfg = cfg
+        self.on_event = on_event  # settable: wired once the clip recorder exists
         self.relations = [Relation.build(r, labels) for r in cfg.relations]
+        self._detection_ids = {
+            _class_id(labels, name, "detections") for name in cfg.detections
+        }
+        # track id -> (class id, last inference it was seen), detection classes
+        self._seen: dict[int, tuple[int, int]] = {}
 
         args = BYTETrackerArgs.from_config(cfg.tracker)
         self._trackers = {
@@ -187,16 +219,36 @@ class SceneAnalyzer:
 
         self.tracks = empty_detections()
         self.motion_boxes = empty_detections()
-        self.events: list[RelationEvent] = []
+        self.events: list[SceneEvent] = []
 
     @property
     def needs_motion(self) -> bool:
         return self._motion is not None
 
     @property
+    def labels(self) -> list[str]:
+        return self._labels
+
+    @property
+    def alert_names(self) -> list[str]:
+        """Relations whose start is an alert (drawn in the alert color)."""
+        return [r.cfg.name for r in self.relations if r.cfg.name in self._cfg.alerts]
+
+    @property
     def active_ids(self) -> set[int]:
         """Tracks active in at least one relation."""
         return set().union(*(r.active for r in self.relations))
+
+    @property
+    def moving_ids(self) -> set[int]:
+        """Subject tracks with motion inside (relations with `moving: true`)."""
+        return set().union(*(r.moving for r in self.relations))
+
+    @property
+    def alert_ids(self) -> set[int]:
+        """Tracks active in at least one alert relation."""
+        alerts = self._cfg.alerts
+        return set().union(*(r.active for r in self.relations if r.cfg.name in alerts))
 
     def update(self, detections: Detections, motion_frame: Frame | None) -> None:
         """One inference: track, detect motion if needed, evaluate relations."""
@@ -206,15 +258,40 @@ class SceneAnalyzer:
         if self._motion is not None and motion_frame is not None:
             self.motion_boxes = motion = self._motion.detect(motion_frame)
 
-        self.events = [e for r in self.relations for e in r.update(self.tracks, motion)]
+        self.events = self._detection_events() + [
+            e for r in self.relations for e in r.update(self.tracks, motion)
+        ]
         for e in self.events:
-            log.info(
-                "%s: %s #%d %s",
-                e.relation,
-                e.subject,
-                e.track_id,
-                "started" if e.active else "ended",
-            )
+            log.info(e.describe())
+            if self.on_event is not None:
+                try:
+                    self.on_event(e)
+                except Exception:
+                    log.exception("Event handler failed for %s", e.describe())
+
+    def _detection_events(self) -> list[SceneEvent]:
+        """Tracks of `detections` classes appearing / gone for `track_buffer`."""
+        events = []
+        for _, _, cls, tid in self.tracks:
+            cls, tid = int(cls), int(tid)
+            if cls not in self._detection_ids:
+                continue
+            if tid not in self._seen:
+                events.append(self._detection(cls, tid, True))
+            self._seen[tid] = (cls, self._inference)
+        gone = [
+            tid
+            for tid, (_, last) in self._seen.items()
+            if self._inference - last > self._cfg.tracker.track_buffer
+        ]
+        for tid in gone:
+            cls, _ = self._seen.pop(tid)
+            events.append(self._detection(cls, tid, False))
+        return events
+
+    def _detection(self, cls: int, tid: int, active: bool) -> SceneEvent:
+        name = self._labels[cls]
+        return SceneEvent("detection", name, name, tid, active)
 
     def _track(self, detections: Detections) -> Detections:
         self._inference += 1

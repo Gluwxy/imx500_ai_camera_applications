@@ -16,6 +16,9 @@ __pycache__/
 *.rpk
 projects/*/*/models/
 
+# Runtime data (alert clips)
+data/
+
 # --- IDEs and Editors (VS Code, PyCharm, Neovim) ---
 .vscode/
 .idea/

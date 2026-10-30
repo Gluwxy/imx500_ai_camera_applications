@@ -11,6 +11,7 @@ stream:
   rtsp_url: "rtsp://127.0.0.1:8554/porch"
 
 mqtt:
+  enabled: true
   topic: porch/events
   username: porch
 
@@ -21,10 +22,17 @@ analysis:
     max_low_streak: 15    # a track living on low scores only is ignored after this
   motion:
     scale: 0.5
-    show: false
+  detections: [person, package]  # track appeared / gone → MQTT event
   relations:
     # A person with a package inside their box who is moving
     - name: carrying_package
       subject: person
       objects: [package]
       moving: true
+  alerts: [carrying_package]     # clip (clips.seconds before/after) + Telegram
+
+annotator:
+  colors:
+    classes:
+      package: "#f9e2af"  # yellow
+      person: "#cba6f7"   # mauve

@@ -173,52 +173,95 @@ def test_inference_roi_is_used_when_set():
     )
 
 
+MAUVE, YELLOW, RED = (0xCB, 0xA6, 0xF7), (0xF9, 0xE2, 0xAF), (0xF3, 0x8B, 0xA8)
+GREEN = (0xA6, 0xE3, 0xA1)
+SUBTEXT0 = (0xA6, 0xAD, 0xC8)
+
+
+def _colors(**classes):
+    from imx500_core.config import ColorsConfig
+
+    return ColorsConfig(classes=classes)
+
+
 @pytest.mark.parametrize(
     ("fmt", "swapped"), [("XBGR8888", True), ("BGR888", True), ("XRGB8888", False)]
 )
-def test_palette_matches_buffer_channel_order(fmt, swapped):
-    ref = ov.ColorPalette.default().colors[0]
-    c = ov.palette_for_format(fmt).colors[0]
-    # what modlib writes into the buffer (as_bgr) must read back as the real color
-    written = c.as_bgr()
-    real_in_buffer = ref.as_rgb() if swapped else ref.as_bgr()
-    assert written == real_in_buffer
+def test_class_palette_matches_buffer_channel_order(fmt, swapped):
+    palette = ov.class_palette(["package", "person"], _colors(person="#cba6f7"), fmt)
+    # what modlib writes into the buffer (as_bgr) must read back as the real
+    # color: [R, G, B] for RGB-ordered buffers, [B, G, R] otherwise
+    written = [c.as_bgr() for c in palette.colors]
+    expected = [SUBTEXT0, MAUVE] if swapped else [SUBTEXT0[::-1], MAUVE[::-1]]
+    assert written == expected
 
 
-def test_tracks_drawn_with_alert_color_when_holder_is_active():
+def _porch_overlay(alerts=("carrying",), **annotator):
     pytest.importorskip("lap")
-    from imx500_core.config import AnalysisConfig, RelationConfig
+    from imx500_core.config import AnalysisConfig, AnnotatorConfig, RelationConfig
     from imx500_core.processing.analysis import SceneAnalyzer
 
     relation = RelationConfig(name="carrying", subject="person", objects=("package",))
+    labels = ["package", "person"]
     analyzer = SceneAnalyzer(
-        ["package", "person"], AnalysisConfig(relations=(relation,))
+        labels, AnalysisConfig(relations=(relation,), alerts=alerts)
+    )
+    cfg = AnnotatorConfig(
+        colors=_colors(package="#f9e2af", person="#cba6f7"), **annotator
     )
     # person at the center of the input tensor holding a package
     outs = _outputs([[256, 200, 384, 500], [290, 320, 350, 400]], [0.88, 0.62], [1, 0])
     overlay = ov.DetectionOverlay(
         _FakePicam2("XBGR8888"),
         _FakeIMX500(outs),
-        ["package", "person"],
+        labels,
         threshold=0.55,
         analyzer=analyzer,
         min_score=0.25,
+        annotator_cfg=cfg,
     )
     for _ in range(25):
-        imx_outs = [o.copy() for o in outs]  # modlib's pp divides in place
-        overlay._imx500.outputs = imx_outs
+        overlay._imx500.outputs = [o.copy() for o in outs]  # pp divides in place
         req = _FakeRequest({"ScalerCrop": SQUARE_CROP})
         overlay(req)
+    return overlay, analyzer, req
 
-    assert len(analyzer.active_ids) == 1
-    assert len(overlay.detections) == 2
+
+def _person_left_edge(req):
     x0, y0, x1, y1 = (
         int(round(v))
         for v in _expected_px((0.4, 200 / 640, 0.6, 500 / 640), SQUARE_CROP)
     )
-    # XBGR8888 is [R, G, B, X] in numpy: pure red on the person's left edge
-    edge = req.array[(y0 + y1) // 2, x0 - 1 : x0 + 2, :3]
-    assert any(tuple(px) == (255, 0, 0) for px in edge)
+    # XBGR8888 is [R, G, B, X] in numpy
+    return {tuple(px) for px in req.array[(y0 + y1) // 2, x0 - 1 : x0 + 2, :3]}
+
+
+def test_subject_of_an_active_alert_is_drawn_in_the_alert_color():
+    overlay, analyzer, req = _porch_overlay()
+    assert len(analyzer.alert_ids) == 1
+    assert len(overlay.detections) == 2
+    assert RED in _person_left_edge(req)
+
+
+def test_active_relation_without_alert_keeps_the_class_color():
+    _, analyzer, req = _porch_overlay(alerts=())
+    assert len(analyzer.active_ids) == 1 and analyzer.alert_ids == set()
+    edge = _person_left_edge(req)
+    assert MAUVE in edge and RED not in edge
+
+
+def test_legend_lists_classes_and_alert_relations():
+    overlay, analyzer, req = _porch_overlay(legend=True)
+    entries = [(text, c.as_bgr()) for text, c in overlay.legend_entries(analyzer)]
+    # colors as written into the RGB-ordered buffer
+    assert entries == [("package", YELLOW), ("person", MAUVE), ("carrying", RED)]
+    # first chip drawn in the top-left corner
+    assert tuple(req.array[ov.LEGEND_MARGIN + 2, ov.LEGEND_MARGIN + 2, :3]) == YELLOW
+
+
+def test_legend_can_be_disabled():
+    _, _, req = _porch_overlay(legend=False)
+    assert not req.array[ov.LEGEND_MARGIN + 2, ov.LEGEND_MARGIN + 2].any()
 
 
 def test_motion_frame_is_small_three_channel_copy():
@@ -230,3 +273,41 @@ def test_motion_frame_is_small_three_channel_copy():
     assert frame.image.shape == (320, 320, 3)
     assert (frame.width, frame.height) == (320, 320)
     assert not np.shares_memory(frame.image, image)
+
+
+def test_moving_subject_is_drawn_in_the_moving_color():
+    """Like modlib's Motion demo: the person's box turns green while it moves."""
+    pytest.importorskip("lap")
+    from imx500_core.config import AnalysisConfig, AnnotatorConfig, RelationConfig
+    from imx500_core.processing.analysis import SceneAnalyzer
+
+    relation = RelationConfig(name="walking", subject="person", moving=True)
+    labels = ["package", "person"]
+    analyzer = SceneAnalyzer(labels, AnalysisConfig(relations=(relation,)))
+    overlay = ov.DetectionOverlay(
+        _FakePicam2("XBGR8888"),
+        _FakeIMX500(None),
+        labels,
+        analyzer=analyzer,
+        min_score=0.25,
+        annotator_cfg=AnnotatorConfig(colors=_colors(person="#cba6f7")),
+    )
+    rng = np.random.default_rng(0)
+    for i in range(25):
+        dy = 4 * i
+        box = [256, 100 + dy, 384, 400 + dy]
+        overlay._imx500.outputs = _outputs([box], [0.85], [1])
+        req = _FakeRequest({"ScalerCrop": SQUARE_CROP})
+        x0, y0, x1, y1 = (
+            int(v)
+            for v in _expected_px(
+                (0.4, (100 + dy) / 640, 0.6, (400 + dy) / 640), SQUARE_CROP
+            )
+        )
+        # a textured, changing person: Motion sees it move
+        req.array[y0:y1, x0:x1, :3] = rng.integers(0, 255, (y1 - y0, x1 - x0, 1))
+        overlay(req)
+
+    (pid,) = analyzer.moving_ids
+    assert analyzer.labels_for(analyzer.tracks)[0].startswith(f"#{pid} person moving")
+    assert GREEN in {tuple(px) for px in req.array[y0 - 1 : y0 + 2, (x0 + x1) // 2, :3]}
