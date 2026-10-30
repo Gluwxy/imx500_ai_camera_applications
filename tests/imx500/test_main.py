@@ -40,6 +40,8 @@ def wired(monkeypatch, project_dir, base_file):
     stream = MagicMock(return_value=(MagicMock(), MagicMock()))
     monkeypatch.setattr(app, "setup_camera", setup)
     monkeypatch.setattr(app, "start_streaming", stream)
+    monkeypatch.setattr(app, "TelegramNotifier", MagicMock())
+    monkeypatch.setattr(app, "MqttPublisher", MagicMock())
     monkeypatch.setattr(app.signal, "signal", MagicMock())
     return picam2, setup, stream
 
@@ -53,11 +55,14 @@ def test_runs_and_releases_the_camera_on_shutdown(wired, monkeypatch):
 
     setup.assert_called_once()
     stream.assert_called_once()
-    assert picam2.pre_callback is not None
+    overlay = picam2.pre_callback
+    # analyzer events go to the dispatcher, with the clip recorder from the stream
+    assert isinstance(overlay.analyzer.on_event, app.EventDispatcher)
     _, recorder = stream.return_value
     recorder.close.assert_called_once()  # clip finalized before the encoder stops
     picam2.stop_recording.assert_called_once()
     picam2.close.assert_called_once()
+    app.TelegramNotifier.return_value.close.assert_called_once()
 
 
 def test_frozen_camera_exits_with_code_1(wired, monkeypatch):

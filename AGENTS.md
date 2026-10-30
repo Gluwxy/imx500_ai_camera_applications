@@ -31,11 +31,14 @@ make model PROJECT=porch_piracy           # download network.rpk from GitHub Rel
 
 - `src/imx500_core/` — shared core (`module-name` in `pyproject.toml`; the project name differs).
   - `config.py` — frozen Pydantic models (`extra="forbid"`: a new YAML key needs a model field). `load_config("porch_piracy")` merges the root `config.yaml` (shared) with `projects/<task>/<project>/config.yaml` (wins key by key); model paths are relative to the project folder; secrets (`TELEGRAM_TOKEN`, `MQTT_PASSWORD`) come from the environment or the root `.env`.
-  - `camera/camera.py` — IMX500 + Picamera2 setup (`setup_camera`); closes the camera if configuration fails. `camera/stream.py` — H.264 encoder → RTSP (`PyavOutput`, TCP).
-  - `processing/overlay.py` — `pre_callback`: IMX500 outputs → modlib `pp_od_yolo_ultralytics` → boxes in image space (modlib `ROI`) → `SceneAnalyzer` → modlib `Annotator` drawing in place on the `MappedArray`.
-  - `processing/analysis.py` — `SceneAnalyzer`: one modlib `BYTETracker` per class (+ `max_low_streak`), modlib `Motion` only if a relation needs it, and the project's `analysis.relations`: per relation one `Matcher` per object class and one on the motion boxes; a subject track is active while every condition holds (`RelationEvent` on start/end).
+  - `camera/camera.py` — IMX500 + Picamera2 setup (`setup_camera`); closes the camera if configuration fails. `camera/stream.py` — one H.264 encoder → RTSP (`PyavOutput`, TCP) + `CircularOutput2`; `ClipRecorder` cuts alert clips (`clips.seconds` before + after, kept open `2 × seconds`) on a worker thread, one at a time, and runs callbacks with the saved path.
+  - `processing/overlay.py` — `pre_callback`: IMX500 outputs → modlib `pp_od_yolo_ultralytics` → boxes in image space (modlib `ROI`) → `SceneAnalyzer` → modlib `Annotator` drawing in place on the `MappedArray`: the label is the track's legend (class, `+object`, `moving`, score) and its color is its state: class color → `moving` (green) once Motion sees it move → `alert` (red) while subject of an active alert relation; Motion boxes as thin unlabeled outlines (`show_motion`); optional chip legend (`legend`). Colors from `annotator.colors` (Catppuccin Mocha).
+  - `processing/analysis.py` — `SceneAnalyzer`: one modlib `BYTETracker` per class (+ `max_low_streak`), modlib `Motion` only if a relation needs it, and the project's `analysis.relations`: per relation one `Matcher` per object class and one on the motion boxes; a subject track is active while every condition holds. Emits `SceneEvent`s (relation start/end, and track appeared/gone for `detections` classes) to `on_event`.
   - `main.py` / `__main__.py` — `python -m imx500_core <project>` (or `$PROJECT`): config → analyzer → camera → overlay → stream → watchdog/heartbeat loop; returns the exit code.
-  - Planned: `monitors/` (dashboard, telemetry), `services/` (MQTT, Telegram, fed by `RelationEvent`s).
+  - `services/alerts.py` — `EventDispatcher` (the analyzer's `on_event`): every event → MQTT; events named in `analysis.alerts` (with `telegram.cooldown_s`) → clip → Telegram video with caption (event, track, time, project). Runs on the camera thread: it only queues work.
+  - `services/mqtt.py` — stdlib MQTT 3.1.1 publisher (QoS 0, user/password, keepalive), worker thread, bounded queue, reconnect with backoff. No paho dependency.
+  - `services/telegram.py` — stdlib Bot API client (`sendVideo` multipart, `sendMessage`), worker thread.
+  - Planned: `monitors/` (dashboard, telemetry).
 - `projects/<task>/<project>/` — one app per folder: `config.yaml` (model, overrides, `analysis.relations`), `labels.txt`, `project.mk` (model release for `make model`), `models/` (git-ignored), README.
   A relation is `{name, subject, objects: [...], moving: bool}` with class names from `labels.txt`; e.g. porch_piracy: `subject: person, objects: [package], moving: true`. A motion-only relation (`objects: []`, `moving: true`) works with any class.
 - `tests/` — pytest. `conftest.py` mocks `picamera2` when it isn't installed and creates fake model files in `tmp_path` (`*.rpk` is git-ignored, never commit a dummy one). `tests/fixtures/` holds a base config and a project config.
@@ -54,6 +57,7 @@ make model PROJECT=porch_piracy           # download network.rpk from GitHub Rel
 - Behaviour changes come with a test; when fixing a field bug, build the test from the Pi logs.
 - Code, comments and UI in English. Brief conventional commits (`feat:`, `fix:`, `test:`, `refactor:`, `ci:`, `chore:`, `docs:`).
 - Never commit `.env`, `*.rpk`, `*.crt`, `*.key`, `data/`, datasets.
+- Clips are not yet repaired for Safari/QuickTime (see "Video & clips"): the `avcC` fix is pending.
 
 ## Known facts (learned the hard way)
 

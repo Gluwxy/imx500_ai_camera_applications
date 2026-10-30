@@ -1,9 +1,9 @@
 """Entry point: `python -m imx500_core <project>` (or PROJECT in the env).
 
-config → analyzer (before the camera: config errors fail fast) → camera →
-overlay (pre_callback) → H.264 stream + clip buffer → watchdog loop.
-Everything after opening the camera lives inside the `try`, so `finally`
-always releases it.
+config → analyzer + MQTT/Telegram (before the camera: config errors fail
+fast) → camera → overlay (pre_callback) → H.264 stream + clip buffer → events
+wired to the dispatcher → watchdog loop. Everything after opening the camera
+lives inside the `try`, so `finally` always releases it.
 """
 
 import argparse
@@ -21,6 +21,9 @@ from .camera.stream import ClipRecorder, start_streaming
 from .config import load_config
 from .processing.analysis import SceneAnalyzer
 from .processing.overlay import DetectionOverlay, load_labels
+from .services.alerts import EventDispatcher
+from .services.mqtt import MqttPublisher
+from .services.telegram import TelegramNotifier
 
 log = logging.getLogger(__name__)
 
@@ -86,6 +89,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     labels = load_labels(config.model.labels_file)
     analysis = config.analysis
     analyzer = SceneAnalyzer(labels, analysis) if analysis.enabled else None
+    mqtt = MqttPublisher(config.mqtt) if config.mqtt.enabled else None
+    telegram = TelegramNotifier(config.telegram) if config.telegram.enabled else None
 
     log.info("Initializing Raspberry Pi AI Camera (IMX500)...")
     camera_state = setup_camera(cfg=config.camera, model_cfg=config.model)
@@ -108,6 +113,15 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         log.info("Starting RTSP video streaming...")
         _, recorder = start_streaming(picam2, config.stream, config.clips)
+        if analyzer is not None:
+            analyzer.on_event = EventDispatcher(
+                project=args.project,
+                alerts=analysis.alerts,
+                cooldown_s=config.telegram.cooldown_s,
+                recorder=recorder,
+                telegram=telegram,
+                mqtt=mqtt,
+            )
         log.info("System online. Streaming to %s", config.stream.rtsp_url)
 
         while not stop_event.wait(timeout=HEARTBEAT_INTERVAL_S):
@@ -142,6 +156,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         _safe_cleanup(picam2.stop_recording, "stop_recording")
         _safe_cleanup(picam2.stop_preview, "stop_preview")
         _safe_cleanup(picam2.close, "close")
+        if telegram is not None:
+            _safe_cleanup(telegram.close, "telegram")
+        if mqtt is not None:
+            _safe_cleanup(mqtt.close, "mqtt")
         log.info("Shutdown completed.")
 
     return exit_code
