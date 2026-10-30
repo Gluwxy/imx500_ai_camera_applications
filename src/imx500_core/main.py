@@ -1,9 +1,10 @@
 """Entry point: `python -m imx500_core <project>` (or PROJECT in the env).
 
 config → analyzer + MQTT/Telegram (before the camera: config errors fail
-fast) → camera → overlay (pre_callback) → H.264 stream + clip buffer → events
-wired to the dispatcher → watchdog loop. Everything after opening the camera
-lives inside the `try`, so `finally` always releases it.
+fast) → dashboard (before the camera, so clips and metrics stay reachable
+while it starts or fails) → camera → overlay (pre_callback) → H.264 stream +
+clip buffer → events wired to the dispatcher → watchdog loop. Everything after
+opening the camera lives inside the `try`, so `finally` always releases it.
 """
 
 import argparse
@@ -15,10 +16,13 @@ import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from threading import Event
+from urllib.parse import urlparse
 
 from .camera.camera import setup_camera
 from .camera.stream import ClipRecorder, start_streaming
-from .config import load_config
+from .config import AppConfig, load_config
+from .monitors.dashboard import list_clips, mediamtx_paths, start_dashboard
+from .monitors.system_stats import SystemStats
 from .processing.analysis import SceneAnalyzer
 from .processing.overlay import DetectionOverlay, load_labels
 from .services.alerts import EventDispatcher
@@ -58,6 +62,52 @@ def _rss_mb() -> float | None:
     return None
 
 
+class AppStatus:
+    """Builds /api/status and applies /api/overlay; works before the camera."""
+
+    def __init__(self, config: AppConfig, stats: SystemStats | None = None) -> None:
+        self._config = config
+        self._stats = stats or SystemStats()
+        self.overlay: DetectionOverlay | None = None
+        self.stream_path = urlparse(config.stream.rtsp_url).path.strip("/")
+
+    def status(self) -> dict:
+        overlay = self.overlay
+        if overlay is None:
+            imx500 = {"temp_c": None}
+            watchdog = {"ok": False, "last_frame_s": None}
+            show = None
+        else:
+            since = time.monotonic() - overlay.last_frame_time
+            imx500 = {"temp_c": overlay.sensor_temp}
+            watchdog = {
+                "ok": since < WATCHDOG_TIMEOUT_S,
+                "last_frame_s": round(since, 1),
+            }
+            show = overlay.show_detections
+        return {
+            **self._stats.snapshot(),
+            "imx500": imx500,
+            "watchdog": watchdog,
+            "stream": {
+                "sources": mediamtx_paths(self.stream_path),
+                "whep_port": self._config.dashboard.whep_port,
+            },
+            "overlay": {"show_detections": show},
+            "clips": list_clips(self._config.clips.dir),
+        }
+
+    def set_overlay(self, body: dict) -> dict:
+        show = body.get("show_detections")
+        if not isinstance(show, bool):
+            raise ValueError("show_detections must be true or false")
+        if self.overlay is None:
+            raise ValueError("the camera is not running")
+        self.overlay.show_detections = show
+        log.info("Detections on the stream: %s", "shown" if show else "hidden")
+        return {"show_detections": show}
+
+
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="imx500_core", description="Run an IMX500 AI Camera project."
@@ -92,6 +142,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     mqtt = MqttPublisher(config.mqtt) if config.mqtt.enabled else None
     telegram = TelegramNotifier(config.telegram) if config.telegram.enabled else None
 
+    app_status = AppStatus(config)
+    dashboard = None
+    if config.dashboard.enabled:
+        dashboard = start_dashboard(
+            get_status=app_status.status,
+            set_overlay=app_status.set_overlay,
+            clips_dir=config.clips.dir,
+            host=config.dashboard.host,
+            port=config.dashboard.port,
+        )
+
     log.info("Initializing Raspberry Pi AI Camera (IMX500)...")
     camera_state = setup_camera(cfg=config.camera, model_cfg=config.model)
     picam2 = camera_state.picam2
@@ -110,6 +171,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             annotator_cfg=config.annotator,
         )
         picam2.pre_callback = overlay
+        app_status.overlay = overlay
 
         log.info("Starting RTSP video streaming...")
         _, recorder = start_streaming(picam2, config.stream, config.clips)
@@ -160,6 +222,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             _safe_cleanup(telegram.close, "telegram")
         if mqtt is not None:
             _safe_cleanup(mqtt.close, "mqtt")
+        if dashboard is not None:
+            _safe_cleanup(dashboard.shutdown, "dashboard")
         log.info("Shutdown completed.")
 
     return exit_code

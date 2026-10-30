@@ -42,6 +42,7 @@ def wired(monkeypatch, project_dir, base_file):
     monkeypatch.setattr(app, "start_streaming", stream)
     monkeypatch.setattr(app, "TelegramNotifier", MagicMock())
     monkeypatch.setattr(app, "MqttPublisher", MagicMock())
+    monkeypatch.setattr(app, "start_dashboard", MagicMock())
     monkeypatch.setattr(app.signal, "signal", MagicMock())
     return picam2, setup, stream
 
@@ -80,3 +81,45 @@ def test_stream_failure_still_releases_the_camera(wired):
 
     assert app.main(["demo"]) == 1
     picam2.close.assert_called_once()
+
+
+def test_dashboard_starts_before_the_camera_and_is_shut_down(wired, monkeypatch):
+    picam2, setup, _ = wired
+    order = []
+    app.start_dashboard.side_effect = lambda **kw: (
+        order.append("dashboard") or (app.start_dashboard.return_value)
+    )
+    setup.side_effect = lambda **kw: order.append("camera") or setup.return_value
+    monkeypatch.setattr(app.stop_event, "wait", lambda timeout: True)
+
+    assert app.main(["demo"]) == 0
+    assert order == ["dashboard", "camera"]
+    app.start_dashboard.return_value.shutdown.assert_called_once()
+
+
+def test_status_and_overlay_toggle(project_dir, base_file, monkeypatch, tmp_path):
+    monkeypatch.setenv("TELEGRAM_TOKEN", "t")
+    config = app.load_config(project_dir, base_file)
+    stats = MagicMock()
+    stats.snapshot.return_value = {"cpu": {"pct": 12.5}}
+    monkeypatch.setattr(app, "mediamtx_paths", lambda default: [default, "raw"])
+    status = app.AppStatus(config, stats)
+
+    before = status.status()
+    assert before["cpu"] == {"pct": 12.5}
+    assert before["overlay"] == {"show_detections": None}  # no camera yet
+    assert before["watchdog"]["ok"] is False
+    assert before["stream"]["sources"] == ["porch", "raw"]
+    assert before["stream"]["whep_port"] == 8889
+    with pytest.raises(ValueError, match="not running"):
+        status.set_overlay({"show_detections": False})
+
+    status.overlay = MagicMock(show_detections=True, sensor_temp=51.0)
+    status.overlay.last_frame_time = app.time.monotonic()
+    assert status.set_overlay({"show_detections": False}) == {"show_detections": False}
+    after = status.status()
+    assert after["overlay"] == {"show_detections": False}
+    assert after["imx500"] == {"temp_c": 51.0}
+    assert after["watchdog"]["ok"] is True
+    with pytest.raises(ValueError, match="true or false"):
+        status.set_overlay({"show_detections": "no"})

@@ -1,5 +1,8 @@
 # MediaMTX: only RTSP (TCP, the app publishes here) and WebRTC (dashboard
-# preview, port 8889) are enabled.
+# preview, port 8889) are enabled. The control API listens on localhost only:
+# the dashboard reads it to list the stream sources.
+api: yes
+apiAddress: 127.0.0.1:9997
 rtmp: no
 hls: no
 webrtc: yes
