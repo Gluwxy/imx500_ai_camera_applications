@@ -16,8 +16,11 @@ are drawn instead of the raw detections. The label of each track is its
 legend: class, conditions met (`+package`, `moving`) and score; its color is
 its state (`annotator.colors`, Catppuccin by default): the class color, then
 `moving` once Motion sees it move, then `alert` while it is the subject of an
-active alert relation. Motion boxes are thin unlabeled outlines (optional),
-and an optional chip legend sits in the top-left corner.
+active alert relation. Boxes get a translucent fill (`fill_alpha`), blended
+only inside each box (modlib's own `alpha` copies the whole frame per box).
+Motion boxes are thin unlabeled outlines (optional), and an optional chip
+legend sits in the top-left corner. `show_detections` (dashboard toggle) turns
+all drawing off without stopping the analysis.
 """
 
 import logging
@@ -161,6 +164,7 @@ class DetectionOverlay:
         # With a tracker, low scores are kept: ByteTrack uses them
         self._min_score = threshold if min_score is None else min_score
         self._cfg = annotator_cfg or AnnotatorConfig()
+        self.show_detections = self._cfg.show_detections
 
         stream_cfg = picam2.camera_configuration()[stream]
         self._width, self._height = stream_cfg["size"]
@@ -254,16 +258,42 @@ class DetectionOverlay:
             roi=ROI(0.0, 0.0, 1.0, 1.0),
         )
 
+    def fill_boxes(
+        self, image: np.ndarray, dets: Detections, color: Color | None
+    ) -> None:
+        """Translucent fill inside each box (`fill_alpha`), cost ∝ box area."""
+        alpha = self._cfg.fill_alpha
+        if alpha <= 0 or not len(dets):
+            return
+        h, w = image.shape[:2]
+        for (x1, y1, x2, y2), _, cls, _ in dets:
+            c = color or self._palette.by_idx(int(cls))
+            x1, x2 = (int(np.clip(v * w, 0, w)) for v in (x1, x2))
+            y1, y2 = (int(np.clip(v * h, 0, h)) for v in (y1, y2))
+            roi = image[y1:y2, x1:x2]
+            if roi.size == 0:
+                continue
+            solid = np.empty_like(roi)
+            solid[...] = (*c.as_bgr(), 255)[: roi.shape[2]]
+            cv2.addWeighted(solid, alpha, roi, 1 - alpha, 0, dst=roi)
+
+    def _boxes(
+        self, frame: Frame, dets: Detections, labels: list[str], color: Color | None
+    ) -> None:
+        self.fill_boxes(frame.image, dets, color)
+        self._annotator.annotate_boxes(frame, dets, labels=labels, color=color)
+
     def _draw(self, image: np.ndarray) -> None:
+        if not self.show_detections:
+            return
         # `image` is a view of the request buffer: modlib draws in place
         frame = self._frame(image, self._width, self._height)
         a, ann = self._analyzer, self._annotator
 
         if a is None:
             if len(self.detections):
-                ann.annotate_boxes(
-                    frame, self.detections, labels=self.labels_for(self.detections)
-                )
+                dets = self.detections
+                self._boxes(frame, dets, self.labels_for(dets), None)
             return
 
         if self._cfg.show_motion and len(a.motion_boxes):
@@ -285,9 +315,7 @@ class DetectionOverlay:
             for mask, color in groups:
                 sel = tracks[mask]
                 if len(sel):
-                    ann.annotate_boxes(
-                        frame, sel, labels=a.labels_for(sel), color=color
-                    )
+                    self._boxes(frame, sel, a.labels_for(sel), color)
         if self._cfg.legend:
             self._draw_legend(image, a)
 

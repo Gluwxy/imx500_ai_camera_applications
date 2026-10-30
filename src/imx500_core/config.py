@@ -75,11 +75,15 @@ class AnnotatorConfig(Base):
     colors: ColorsConfig = ColorsConfig()
     legend: bool = False  # chips with class/state colors, top-left corner
     show_motion: bool = False  # draw the Motion boxes (debug)
+    fill_alpha: float = Field(default=0.4, ge=0.0, le=1.0)  # box fill, 0 = none
+    show_detections: bool = True  # initial state of the dashboard toggle
 
 
 class DashboardConfig(Base):
+    enabled: bool = True
     host: str = "0.0.0.0"
     port: int = Field(default=8000, ge=1, le=65535)
+    whep_port: int = Field(default=8889, ge=1, le=65535)  # MediaMTX WebRTC
 
 
 class MqttConfig(Base):

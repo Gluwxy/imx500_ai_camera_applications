@@ -145,8 +145,38 @@ def test_callback_draws_boxes_in_place_and_filters_threshold():
     # box edges were drawn into the request buffer (no copy)
     assert req.array[(y0 + y1) // 2, x0 - 1 : x0 + 2].any()
     assert req.array[(y0 + y1) // 2, x1 - 1 : x1 + 2].any()
-    # interior stays untouched (no alpha fill)
-    assert not req.array[(y0 + y1) // 2, (x0 + x1) // 2].any()
+    # interior: 40 % of the default class color over the black frame
+    center = req.array[(y0 + y1) // 2, (x0 + x1) // 2, :3].astype(int)
+    assert np.allclose(center, np.array(SUBTEXT0) * 0.4, atol=2)
+
+
+def test_fill_can_be_disabled_and_stays_inside_the_box():
+    from imx500_core.config import AnnotatorConfig
+
+    outs = _outputs([[256, 256, 384, 384]], [0.88], [1])
+    overlay = ov.DetectionOverlay(
+        _FakePicam2(),
+        _FakeIMX500(outs),
+        ["package", "person"],
+        annotator_cfg=AnnotatorConfig(fill_alpha=0.0),
+    )
+    req = _FakeRequest({"ScalerCrop": SQUARE_CROP})
+    overlay(req)
+    x0, y0, x1, y1 = (
+        int(round(v)) for v in _expected_px((0.4, 0.4, 0.6, 0.6), SQUARE_CROP)
+    )
+    assert not req.array[(y0 + y1) // 2, (x0 + x1) // 2].any()  # no fill
+    assert req.array[(y0 + y1) // 2, x0 - 1 : x0 + 2].any()  # outline still drawn
+
+
+def test_hidden_detections_draw_nothing_but_keep_parsing():
+    outs = _outputs([[256, 256, 384, 384]], [0.88], [1])
+    overlay = ov.DetectionOverlay(_FakePicam2(), _FakeIMX500(outs), ["a", "person"])
+    overlay.show_detections = False
+    req = _FakeRequest({"ScalerCrop": SQUARE_CROP})
+    overlay(req)
+    assert len(overlay.detections) == 1
+    assert not req.array.any()
 
 
 def test_keeps_last_detections_on_frames_without_outputs():

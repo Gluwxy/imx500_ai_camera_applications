@@ -24,15 +24,20 @@ clips:
 annotator:
   legend: false         # optional chips (classes, states) in the top-left corner
   show_motion: false    # draw the Motion boxes (debug)
+  fill_alpha: 0.4       # translucent fill inside the boxes (0 = outline only)
+  show_detections: true # initial state of the dashboard "Show detections" toggle
   colors:
     default: "#a6adc8"  # subtext0: classes without their own color
     alert: "#f38ba8"    # red: subject of an active alert relation
     moving: "#a6e3a1"   # green: subject moving (relations with `moving: true`)
     motion: "#b4befe"   # lavender: Motion boxes and the "motion" chip
 
+# Web dashboard: live WebRTC view, hardware metrics, alert clips
 dashboard:
+  enabled: true
   host: "0.0.0.0"
   port: 8000
+  whep_port: 8889       # MediaMTX WebRTC (WHEP) port used by the browser
 
 mqtt:
   enabled: false        # needs a broker (e.g. Mosquitto); projects enable it
